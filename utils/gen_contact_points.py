@@ -2,11 +2,12 @@ import open3d as o3d
 import numpy as np
 from tqdm import tqdm
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.distance import cdist
 import sys
 sys.path.append('/media/labpc2x2080ti/data/dataset/Gen_Score/')
 from utils.calcuate import check_force_closure
 from utils.visualize import *
-
+from utils.collision import *
 
 
 def sample_grasp_centers_from_mesh_interior(mesh_obj, num_samples=10000, return_ratio=0.01):
@@ -37,8 +38,7 @@ def sample_grasp_centers_from_mesh_interior(mesh_obj, num_samples=10000, return_
 
 
 
-# ✅ 2. 从 grasp center 生成接触点对
-def generate_contact_from_grasp_center(mesh_trimesh, center, view, angle, depth):
+def generate_contact_from_grasp_center(mesh_trimesh, center, view, angle, depth, surface_thresh_degree=60):
     view = view / np.linalg.norm(view)
 
     # 构造 grasp 坐标系
@@ -53,27 +53,44 @@ def generate_contact_from_grasp_center(mesh_trimesh, center, view, angle, depth)
     R_final = R_base @ R_inplane
 
     # 张开方向（左右）就是旋转后的 x 轴
-    width_dir = R_final[:, 0] 
+    width_dir = R_final[:, 0]
+
     verts = mesh_trimesh.vertices
     normals = mesh_trimesh.vertex_normals
     rel = verts - center
     depth_along_view = rel @ view
+
     valid_mask = (depth_along_view >= 0) & (depth_along_view <= depth)
-    # visualize_mask_points_on_mesh(mesh_trimesh, valid_mask, color=[0, 1, 0])    
+
     if not np.any(valid_mask):
         return None, None, None, None
 
     inside_points = verts[valid_mask]
     inside_normals = normals[valid_mask]
-    width_proj = (inside_points - center) @ width_dir
 
-    i_left = np.argmin(width_proj)
-    i_right = np.argmax(width_proj)
+    # === 先筛选表面点：法向和view方向夹角接近90度（即外表面）
+    cos_theta = np.abs(inside_normals @ view)
+    angle_thresh = np.cos(np.deg2rad(90 - surface_thresh_degree))
+    surface_mask = cos_theta < angle_thresh
 
-    p1 = inside_points[i_left]
-    p2 = inside_points[i_right]
-    n1 = inside_normals[i_left]
-    n2 = inside_normals[i_right]
+    surface_points = inside_points[surface_mask]
+
+    if surface_points.shape[0] < 2:
+        return None, None, None, None
+
+    # === 在surface points中找最宽的点对
+    proj = (surface_points - center) @ width_dir  # 投影到张开方向
+    proj = proj.reshape(-1, 1)
+
+    # 计算 pairwise distance
+    dists = cdist(proj, proj)
+    i, j = np.unravel_index(np.argmax(dists), dists.shape)
+
+    p1 = surface_points[i]
+    p2 = surface_points[j]
+    n1 = inside_normals[surface_mask][i]
+    n2 = inside_normals[surface_mask][j]
+
 
     return p1, n1, p2, n2
 
@@ -82,6 +99,7 @@ def generate_contact_from_grasp_center(mesh_trimesh, center, view, angle, depth)
 # ✅ 3. 半球视角 + 多角度 + 多深度生成抓取对
 def sample_contact_candidates_from_grasp_center(
     mesh_trimesh,
+    background_points_world,
     center,
     num_views=300,
     num_angles=12,
@@ -112,26 +130,37 @@ def sample_contact_candidates_from_grasp_center(
         for angle in angles:
             for depth in depths:
                 try:
-                    p1, n1, p2, n2 = generate_contact_from_grasp_center(mesh_trimesh,center, view, angle, depth)
+                    p1, n1, p2, n2 = generate_contact_from_grasp_center(mesh_trimesh, center, view, angle, depth, surface_thresh_degree=60)
 
-
+                    # === 检查 None ===
+                    if any(x is None for x in [p1, n1, p2, n2]) or view is None:
+                        continue
                     if np.isnan(p1).any() or np.isnan(p2).any() or np.isnan(n1).any() or np.isnan(n2).any():
                         continue
 
                     fc = check_force_closure(p1, n1, p2, n2, mu=mu)
-                    # === 计算 width: p1-p2 向 view 的垂直距离（乘以比例因子）
+
                     grasp_axis = p2 - p1
                     grasp_axis_norm = grasp_axis / (np.linalg.norm(grasp_axis) + 1e-6)
                     view_norm = view / (np.linalg.norm(view) + 1e-6)
-
-                    # 投影后保留垂直分量
                     dot = np.dot(grasp_axis_norm, view_norm)
                     proj_along_view = dot * view_norm
                     orthogonal_component = grasp_axis_norm - proj_along_view
 
-                    grasp_width = np.linalg.norm(orthogonal_component * np.linalg.norm(grasp_axis))
-                    width = 1.5 * grasp_width # 🔥 最终 width（可调比例）
+                    point_center, rotation = get_grasp_transform(p1, p2,view)
 
+                      
+                    grasp_width = np.linalg.norm(orthogonal_component * np.linalg.norm(grasp_axis))
+                    width =  grasp_width
+                    
+                    if point_center is None or rotation is None:
+                        collides_with_background = True
+                    else:
+                        grasp_box = build_grasp_box(point_center, rotation, width=width, depth=depth, height=0.1)
+                        # o3d.visualization.draw_geometries([grasp_box])
+
+                        collides_with_background = check_grasp_box_collision_with_background(grasp_box, background_points_world)
+                      
                     candidates.append({
                         "center": center.copy(),
                         "p1": p1.copy(), "n1": n1.copy(),
@@ -140,10 +169,15 @@ def sample_contact_candidates_from_grasp_center(
                         "angle": angle,
                         "depth": depth,
                         "width": width,
-                        "fc": fc
+                        "fc": fc,
+                        "collide": collides_with_background,
                     })
+
+
+
+
                 except Exception as e:
-                    print(f"[ERROR] Failed grasp @ center={np.round(center, 3)}, angle={angle}, depth={depth}")
+                    print(f"[ERROR] Failed grasp @ center={np.round(center, 3) if center is not None else 'None'}, angle={angle}, depth={depth}")
                     print(f"Reason: {e}")
                     continue
 
