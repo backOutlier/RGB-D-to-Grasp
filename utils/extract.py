@@ -1,21 +1,24 @@
 from utils.loader import *
 import tempfile
+from config import parser
+args = parser.parse_args()
+from pathlib import Path
 
-def merge_multiview_pointclouds(scene_dir, object_id, visualize_after_fusion=False, return_background=True):
-    """
-    融合多视角下的某个目标物体点云 & 背景点云
-    """
+
+def merge_multiview_pointclouds(scene_dir, object_id, visualize_after_fusion=False, return_background=True):  
     import open3d as o3d
 
     npz_paths, intrinsics, extrinsics = load_intrinsics_and_poses(scene_dir)
     all_object_points = []
     all_background_points = []
-
+    SCALE = args.scale
     for npz_path, (fx, fy, cx, cy), extrinsic in zip(npz_paths, intrinsics, extrinsics):
         object_pts, background_pts = extract_object_and_background_from_npz(
             npz_path, object_id, fx, fy, cx, cy, extrinsic
         )
-
+        object_pts *= SCALE
+        background_pts *= SCALE
+        
         if object_pts.shape[0] > 0:
             all_object_points.append(object_pts)
 
@@ -24,19 +27,19 @@ def merge_multiview_pointclouds(scene_dir, object_id, visualize_after_fusion=Fal
 
     object_pcd = o3d.geometry.PointCloud()
     object_pcd.points = o3d.utility.Vector3dVector(np.concatenate(all_object_points, axis=0))
-
+  
     if return_background:
         background_pcd = o3d.geometry.PointCloud()
         background_pcd.points = o3d.utility.Vector3dVector(np.concatenate(all_background_points, axis=0))
 
-    if visualize_after_fusion:
-        if return_background:
-            object_pcd.paint_uniform_color([1, 0, 0])     # 红色目标
-            background_pcd.paint_uniform_color([0.5, 0.5, 0.5])  # 灰色背景
-            o3d.visualization.draw_geometries([object_pcd, background_pcd],
-                                              window_name=f"Scene View - object {object_id}")
-        else:
-            o3d.visualization.draw_geometries([object_pcd], window_name=f"Object PointCloud - {object_id}")
+    # if visualize_after_fusion:
+    #     if return_background:
+    #         object_pcd.paint_uniform_color([1, 0, 0])    
+    #         background_pcd.paint_uniform_color([0.5, 0.5, 0.5])  
+    #         o3d.visualization.draw_geometries([object_pcd, background_pcd],
+    #                                           window_name=f"Scene View - object {object_id}")
+    #     else:
+    #         o3d.visualization.draw_geometries([object_pcd], window_name=f"Object PointCloud - {object_id}")
 
     return (object_pcd, background_pcd) if return_background else object_pcd
 

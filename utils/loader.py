@@ -34,16 +34,12 @@ def load_intrinsics_and_poses(scene_dir):
 
 
 def extract_object_and_background_from_npz(npz_path, object_id, fx, fy, cx, cy, extrinsic):
-    """
-    返回目标物体和背景的点云 (已转换为世界坐标)
-    """
     data = np.load(npz_path)
     depth = data["depth"]
-    label = data["instances_objects"]  # 每个像素的 instance id
+    label = data["instances_objects"] 
     mask_object = (label == object_id)
-    mask_background = (label != object_id) & (label > 0)  # 忽略背景为 0 或 -1 的区域
+    mask_background = (label != object_id)
 
-    # 像素坐标转相机坐标系
     h, w = depth.shape
     x, y = np.meshgrid(np.arange(w), np.arange(h))
     z = depth
@@ -53,14 +49,13 @@ def extract_object_and_background_from_npz(npz_path, object_id, fx, fy, cx, cy, 
     z3 = z
     points_cam = np.stack([x3, y3, z3], axis=-1).reshape(-1, 3)
 
-    # 蒙版
+  
     mask_object_flat = mask_object.reshape(-1)
     mask_background_flat = mask_background.reshape(-1)
 
     object_points_cam = points_cam[mask_object_flat]
     background_points_cam = points_cam[mask_background_flat]
 
-    # 相机坐标转世界坐标
     object_points_world = (extrinsic[:3, :3] @ object_points_cam.T + extrinsic[:3, 3:4]).T
     background_points_world = (extrinsic[:3, :3] @ background_points_cam.T + extrinsic[:3, 3:4]).T
 

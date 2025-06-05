@@ -2,35 +2,59 @@ from tools.generate_object_grasp import GraspCandidateGenerator
 import os
 import json
 from utils.extract import *
+import multiprocessing
+from functools import partial
+from utils.sample import *
+
+from config import parser
+args = parser.parse_args()
+
+
+
+def process_object(object_id, base_path, scene_folder):
+    print(f"\n[Object {object_id}] Processing...")
+
+    # fuse point clouds from multiple views(36 views in MetaGraspNet)
+    object_points_world, background_points_world = merge_multiview_pointclouds(
+        base_path, object_id, visualize_after_fusion=args.visualize_fusion_pc, return_background=True
+    )
+
+
+    grasp_object = GraspCandidateGenerator(
+        object_points_world=object_points_world,
+        background_points_world=background_points_world.points
+    )
+
+    candidate=grasp_object.generate_grasp_candidates(
+        num_points=args.num_points, num_views=args.num_views, num_angles=args.num_angles, num_depths=args.num_depths,
+        depth_range=args.depth_range,  visualize_each=args.visualize_grasp, visualize_num=args.visualize_num, num_threads=args.num_threads
+    )
+    scene_name = os.path.basename(os.path.normpath(scene_folder))      # 'scene0' 等
+
+    root_dir   = "/media/labpc2x2080ti/data/dataset/Gen_Score/npy"     # 顶层目录
+    scene_dir  = os.path.join(root_dir, scene_name)                    # …/npy/scene0
+    os.makedirs(scene_dir, exist_ok=True)                              # 自动建文件夹
+
+    save_path  = os.path.join(scene_dir, f"{object_id:03d}_candidates.npz")
+    np.savez_compressed(save_path, candidates=candidate)               # 建议用 np.savez_compressed
+
+    print(f"[✓] Saved to {save_path}")
+
 def main():
-    # === 文件路径 ===
-    base_path = "/media/labpc2x2080ti/data/dataset/MetaGraspNet/scene2/"
+    base_path = args.base_path
+    scene_id = args.scene_id
+    for scene_id in range(1, 10):  # 1 to 499   
+        scene_path = os.path.join(base_path, f"scene{scene_id}")
+        scene_folder = scene_path
+        order_path = os.path.join(scene_path, "0_order.json")
+        with open(order_path, 'r') as f:
+            order_data = json.load(f)
 
-    order_path = os.path.join(base_path, "2_order.json")
-    out_path   = "/media/labpc2x2080ti/data/dataset/meta_ann_gen/merged_2.npz"
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-   
-
-
-    with open(order_path, 'r') as f:
-        order_data = json.load(f)
-
-    ordered_ids = [int(k) for k in sorted(order_data.keys(), key=lambda x: order_data[x]["layer"]) if int(k) > 0]
-
-    scene_folder = "/media/labpc2x2080ti/data/dataset/MetaGraspNet/scene2"
-    for object_id in ordered_ids:
-        print(f"\n[Object {object_id}] Processing...")
-        object_points_world, background_points_world=merge_multiview_pointclouds(base_path,object_id, visualize_after_fusion=False, return_background=True)
-        # object_mesh_path = "/media/labpc2x2080ti/data/dataset/Gen_Score/Meshes/scene2_object1.obj"
-        object_mesh,object_mesh_path= create_mesh_from_points(object_points_world.points, method='bpa', depth=9, scene_folder=scene_folder, object_id=object_id)
-        grasp_object=GraspCandidateGenerator(mesh_path=object_mesh_path, background_points_world=background_points_world.points)
-        grasp_object.generate_grasp_candidates(num_points=1000, num_views=300, num_angles=12, num_depths=4, depth_range=(0.02, 0.06), mu=0.8, visualize_each=False, visualize_num=24)
-        break
+        ordered_ids = [int(k) for k in sorted(order_data.keys(), key=lambda x: order_data[x]["layer"]) if int(k) > 0]
 
 
-
-
+        for object_id in ordered_ids:
+            process_object(object_id, base_path=scene_path, scene_folder=scene_folder)
 
 if __name__ == "__main__":
     main()
